@@ -42,6 +42,13 @@ Practice (four practice cases, scored locally against SullyGnome averages):
 Leave-one-out over the 27 comparables with hour-1 >= 20,000: 0.2560 vs the
 baseline's 0.3214, so the gain is not an artefact of the four practice cases.
 
+Revision: the per-hour fit now precomputes the comparables' log hour-1
+prints and weights once per case instead of once per hour, and the hour
+regression lives in its own helper (regression_hour_quantiles). The forecast
+is unchanged: byte-identical outputs on all four practice cases. A
+viewers-per-channel second predictor was tested and rejected (correlation
+with the evening peak +0.02 across comparables; practice 0.2110, worse).
+
 Runtime is well under 1 s per case on one CPU (cap 8 s); memory is a few MB.
 Stdlib only. Deterministic: same input bytes -> same output bytes.
 """
@@ -241,22 +248,34 @@ def forecast_case(case):
     lx_cap = math.log(max(console_y1)) if console_y1 else math.log(max(c["y1"] for c in fit_pool))
     lx = min(max(lx, lx_floor), lx_cap)
 
+    # The comparables' log hour-1 prints and weights are the same for every
+    # forecast hour, so compute them once per case, not once per hour.
+    fit_xs = [math.log(c["y1"]) for c in fit_pool]
+    fit_ws = [c["weight"] for c in fit_pool]
     hours = []
     for h in range(2, 25):
-        xs = [math.log(c["y1"]) for c in fit_pool]
         ys = [math.log(c["viewers"][h - 1] / c["y1"]) for c in fit_pool]
-        ws = [c["weight"] for c in fit_pool]
-        a, b = ols(xs, ys, ws)
-        med = a + b * lx
-        residuals = sorted(y - (a + b * x) for x, y in zip(xs, ys))
-        med_res = quantile_sorted(residuals, 0.5)
-        qs = [med + (quantile_sorted(residuals, t) - med_res) for t in LEVELS]
+        qs = regression_hour_quantiles(fit_xs, ys, fit_ws, lx)
         row = [round2(max(1.0, p1 * math.exp(q))) for q in qs]
         for j in range(1, 5):
             if row[j] < row[j - 1]:
                 row[j] = row[j - 1]
         hours.append({"hour": h, "q": row})
     return {"hours": hours}
+
+
+def regression_hour_quantiles(xs, ys, ws, lx):
+    """Five log-quantiles for one forecast hour from the scale regression.
+
+    Fits log(y_h / y_1) ~ a + b*log(y_1) over the comparables, takes the
+    fitted value at lx as the median log-ratio, and spreads it by the
+    re-centred empirical quantiles of the residuals at that hour.
+    """
+    a, b = ols(xs, ys, ws)
+    med = a + b * lx
+    residuals = sorted(y - (a + b * x) for x, y in zip(xs, ys))
+    med_res = quantile_sorted(residuals, 0.5)
+    return [med + (quantile_sorted(residuals, t) - med_res) for t in LEVELS]
 
 
 def main():
